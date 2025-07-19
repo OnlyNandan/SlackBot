@@ -2,42 +2,53 @@ require('dotenv').config();
 const { App, ExpressReceiver } = require("@slack/bolt");
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 const { google } = require('googleapis');
-// NEW: Import the Notion Client
 const { Client } = require("@notionhq/client");
 
 // =================================================================
-// NEW: Function to read from Notion
+// NEW: Function to read from Confluence
 // =================================================================
-async function getNotionPageContent(pageId) {
-  // Initialize Notion client
-  const notion = new Client({ auth: process.env.NOTION_API_KEY });
+async function getConfluencePageContent(pageId) {
+  const baseUrl = process.env.CONFLUENCE_URL;
+  const email = process.env.CONFLUENCE_USER_EMAIL;
+  const apiToken = process.env.CONfluence_API_TOKEN;
+
+  // We need to create a base64-encoded token for Basic Authentication
+  const authToken = Buffer.from(`${email}:${apiToken}`).toString('base64');
+  
+  // The API endpoint to get a page and expand it to include the content
+  const apiUrl = `${baseUrl}/wiki/rest/api/content/${pageId}?expand=body.storage`;
+
   try {
-    console.log(`Fetching content from Notion Page ID: ${pageId}`);
-    // Get all the blocks (paragraphs, headings, etc.) from the page
-    const response = await notion.blocks.children.list({
-      block_id: pageId,
+    console.log(`Fetching content from Confluence Page ID: ${pageId}`);
+    const response = await fetch(apiUrl, {
+      headers: {
+        'Authorization': `Basic ${authToken}`,
+        'Accept': 'application/json',
+      },
     });
 
-    // Extract the plain text from each block
-    let text = '';
-    for (const block of response.results) {
-      if (block.type && block[block.type].rich_text) {
-        text += block[block.type].rich_text.map(rt => rt.plain_text).join('');
-        text += '\n'; // Add a newline after each block
-      }
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status} ${response.statusText}`);
     }
-    console.log("Successfully fetched Notion content.");
+
+    const data = await response.json();
+    // The content is in HTML format, so we'll do a simple cleanup to get text
+    const rawHtml = data.body.storage.value;
+    const text = rawHtml.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+
+    console.log("Successfully fetched Confluence content.");
     return text;
   } catch (error) {
-    console.error("❌ Error fetching from Notion:", error.message);
-    return "Error: Could not retrieve the Notion document.";
+    console.error("❌ Error fetching from Confluence:", error.message);
+    return "Error: Could not retrieve the Confluence document.";
   }
 }
 // =================================================================
 
 
-// --- This is your existing Google Docs function. We are leaving it here for later. ---
-async function getGoogleDocContent(documentId) { /* ... no changes needed here ... */ }
+// --- Your existing Notion and Google Docs functions remain here ---
+async function getNotionPageContent(pageId) { /* ... no changes ... */ }
+async function getGoogleDocContent(documentId) { /* ... no changes ... */ }
 
 
 // --- App Initialization (no changes) ---
@@ -48,22 +59,21 @@ const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY);
 const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash"});
 
 
-// --- Listen for mentions (Temporarily modified for Notion testing) ---
+// --- Listen for mentions (Temporarily modified for Confluence testing) ---
 app.event('app_mention', async ({ event, client, say }) => {
   console.log("✅ app_mention event received!");
   const userQuestion = event.text.replace(/<@.*?>/g, '').trim();
 
   try {
-    // FOR TESTING: We are calling the Notion function instead of the Google Docs one.
-    const notionPageId = "2355be80190b803f8457e77a737af98f";
-    const contextDocument = await getNotionPageContent(notionPageId);
+    // FOR TESTING: We are now calling the Confluence function.
+    const confluencePageId = "131262"; 
+    const contextDocument = await getConfluencePageContent(confluencePageId);
 
     if (contextDocument.startsWith("Error:")) {
       await say(contextDocument);
       return;
     }
 
-    // The rest of the AI prompt logic is the same
     const prompt = `
       You are a helpful assistant. Answer the question based *only* on the provided document.
       If the answer is not found in the document, say "I do not have information on that."
