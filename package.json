@@ -1,0 +1,23 @@
+{
+  "name": "slackbot",
+  "version": "1.0.0",
+  "description": "A RAG AI Agent to solve the end user queries",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/OnlyNandan/SlackBot.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/OnlyNandan/SlackBot/issues"
+  },
+  "homepage": "https://github.com/OnlyNandan/SlackBot#readme",
+  "dependencies": {
+    "@slack/bolt": "^4.4.0"
+  }
+}
