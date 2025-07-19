@@ -1,5 +1,5 @@
 require('dotenv').config();
-const { App } = require("@slack/bolt");
+const { App, ExpressReceiver } = require("@slack/bolt");
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 
 const knowledgeBase = {
@@ -20,21 +20,25 @@ const knowledgeBase = {
     - Project Lead: The project is led by our amazing engineering team.
   `
 };
+
+const receiver = new ExpressReceiver({ signingSecret: process.env.SLACK_SIGNING_SECRET });
+
+receiver.router.get('/', (req, res) => {
+  res.status(200).send('I am alive and ready to serve!');
+});
+
 const app = new App({
   token: process.env.SLACK_BOT_TOKEN,
-  signingSecret: process.env.SLACK_SIGNING_SECRET,
+  receiver: receiver 
 });
 
 const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY);
 const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash"});
 
-app.receiver.router.get('/', (req, res) => {
-  res.status(200).send('I am alive and ready to serve!');
-});
 
 app.event('app_mention', async ({ event, client, say }) => {
   console.log("✅ app_mention event received!");
-  const userQuestion = event.text.replace(/<@.*?>/g, '').trim(); 
+  const userQuestion = event.text.replace(/<@.*?>/g, '').trim();
 
   try {
     const userInfo = await client.users.info({ user: event.user });
@@ -56,11 +60,9 @@ app.event('app_mention', async ({ event, client, say }) => {
     `;
 
     console.log("🤖 Sending prompt to AI...");
-
     const result = await model.generateContent(prompt);
     const response = await result.response;
     const aiResponseText = response.text();
-
     console.log("🧠 AI Response:", aiResponseText);
 
     await say(aiResponseText);
