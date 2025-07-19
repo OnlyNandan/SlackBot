@@ -51,6 +51,65 @@ async function getNotionPageContent(pageId) {
     }
 }
 
+// =================================================================
+// NEW: Core "Thinking" Logic is now in its own function
+// =================================================================
+async function processQuestion(userQuestion, conversationId) {
+    const previousConversation = conversationCache.get(conversationId);
+    const contextDocument = indexedKnowledge;
+    
+    let answerPrompt = `
+      You are a helpful assistant. First, consider the PREVIOUS CONTEXT if it exists. Then, answer the new QUESTION based *only* on the provided DOCUMENT.
+      If the answer is not found in the document, say "I do not have information on that."
+      PREVIOUS CONTEXT: ${previousConversation ? `User asked: "${previousConversation.question}" and you answered: "${previousConversation.answer}"` : "None"}
+      DOCUMENT: --- ${contextDocument} ---
+      NEW QUESTION: "${userQuestion}"
+    `;
+    const answerResult = await model.generateContent(answerPrompt);
+    const mainAnswer = answerResult.response.text();
+
+    let suggestionPrompt = `
+        Based on the following question and answer, suggest three distinct and different follow-up questions.
+        Return ONLY a JavaScript-style array of strings, like ["question 1", "question 2", "question 3"]. Do not include any other text, formatting, or markdown backticks.
+        Question: "${userQuestion}"
+        Answer: "${mainAnswer}"
+    `;
+    const suggestionResult = await model.generateContent(suggestionPrompt);
+    const suggestionText = suggestionResult.response.text();
+    
+    let suggestions = [];
+    try {
+        const arrayStringMatch = suggestionText.match(/\[(.*?)\]/s);
+        if (arrayStringMatch) {
+            const parsedSuggestions = JSON.parse(arrayStringMatch[0]);
+            suggestions = [...new Set(parsedSuggestions)];
+        }
+    } catch (e) {
+        console.error("❌ Error parsing suggestions from AI:", e.message);
+    }
+
+    conversationCache.set(conversationId, { question: userQuestion, answer: mainAnswer });
+
+    // Return the final message payload
+    return {
+        text: mainAnswer,
+        blocks: [
+            { type: "section", text: { type: "mrkdwn", text: mainAnswer } },
+            ...(suggestions.length > 0 ? [
+                { type: "divider" },
+                { type: "section", text: { type: "mrkdwn", text: "You might also want to ask:" } },
+                {
+                    type: "actions",
+                    elements: suggestions.slice(0, 3).map(q => {
+                        const buttonText = q.length > 75 ? q.substring(0, 72) + "..." : q;
+                        return { type: "button", text: { type: "plain_text", text: buttonText, emoji: true }, value: q };
+                    })
+                }
+            ] : [])
+        ]
+    };
+}
+
 const receiver = new ExpressReceiver({ signingSecret: process.env.SLACK_SIGNING_SECRET });
 receiver.router.get('/', (req, res) => { res.status(200).send('I am alive and ready to serve!'); });
 
@@ -69,78 +128,31 @@ app.command('/index', async ({ command, ack, say }) => {
     say("All knowledge sources have been successfully indexed and are ready for questions.");
 });
 
-app.event('app_mention', async ({ event, client, say }) => {
-    const userQuestion = event.text.replace(/<@.*?>/g, '').trim();
-    const conversationId = `convo-${event.user}-${event.channel}`;
-    const previousConversation = conversationCache.get(conversationId);
-
+// The @mention handler is now much simpler
+app.event('app_mention', async ({ event, say }) => {
     try {
-        const contextDocument = indexedKnowledge;
-        
-        let answerPrompt = `
-          You are a helpful assistant. First, consider the PREVIOUS CONTEXT if it exists. Then, answer the new QUESTION based *only* on the provided DOCUMENT.
-          If the answer is not found in the document, say "I do not have information on that."
-          PREVIOUS CONTEXT: ${previousConversation ? `User asked: "${previousConversation.question}" and you answered: "${previousConversation.answer}"` : "None"}
-          DOCUMENT: --- ${contextDocument} ---
-          NEW QUESTION: "${userQuestion}"
-        `;
-        const answerResult = await model.generateContent(answerPrompt);
-        const mainAnswer = answerResult.response.text();
-
-        let suggestionPrompt = `
-            Based on the following question and answer, suggest three likely follow-up questions.
-            Return ONLY a JavaScript-style array of strings, like ["question 1", "question 2", "question 3"]. Do not include any other text, formatting, or markdown backticks.
-            Question: "${userQuestion}"
-            Answer: "${mainAnswer}"
-        `;
-        const suggestionResult = await model.generateContent(suggestionPrompt);
-        const suggestionText = suggestionResult.response.text();
-        
-        let suggestions = [];
-        try {
-            const arrayStringMatch = suggestionText.match(/\[(.*?)\]/s);
-            if (arrayStringMatch) {
-                suggestions = JSON.parse(arrayStringMatch[0]);
-            }
-        } catch (e) {
-            console.error("❌ Error parsing suggestions from AI:", e.message);
-        }
-
-        conversationCache.set(conversationId, { question: userQuestion, answer: mainAnswer });
-
-        await say({
-            text: mainAnswer,
-            blocks: [
-                { type: "section", text: { type: "mrkdwn", text: mainAnswer } },
-                ...(suggestions.length > 0 ? [
-                    { type: "divider" },
-                    { type: "section", text: { type: "mrkdwn", text: "You might also want to ask:" } },
-                    {
-                        type: "actions",
-                        elements: suggestions.slice(0, 3).map(q => {
-                            // THIS IS THE FIX: Truncate the button text if it's too long
-                            const buttonText = q.length > 75 ? q.substring(0, 72) + "..." : q;
-                            return {
-                                type: "button",
-                                text: { type: "plain_text", text: buttonText, emoji: true },
-                                value: q // The full question is still stored in the value
-                            };
-                        })
-                    }
-                ] : [])
-            ]
-        });
-
+        const userQuestion = event.text.replace(/<@.*?>/g, '').trim();
+        const conversationId = `convo-${event.user}-${event.channel}`;
+        const messagePayload = await processQuestion(userQuestion, conversationId);
+        await say(messagePayload);
     } catch (error) {
-        console.error("❌ Error processing AI request:", error);
+        console.error("❌ Error in app_mention:", error);
         await say("Sorry, I encountered an error while thinking. Please try again.");
     }
 });
 
+// The button click handler is also simpler and more direct
 app.action(/.*/, async ({ action, ack, say, body }) => {
     await ack();
-    const question = action.value;
-    await say(`<@${body.user.id}> ${question}`);
+    try {
+        const userQuestion = action.value;
+        const conversationId = `convo-${body.user.id}-${body.channel.id}`;
+        const messagePayload = await processQuestion(userQuestion, conversationId);
+        await say(messagePayload);
+    } catch (error) {
+        console.error("❌ Error in app.action:", error);
+        await say("Sorry, I encountered an error. Please try asking your question again.");
+    }
 });
 
 (async () => {
