@@ -1,10 +1,10 @@
 {
   "name": "slackbot",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "A RAG AI Agent to solve the end user queries",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node index.js"
   },
   "repository": {
     "type": "git",
@@ -18,6 +18,7 @@
   },
   "homepage": "https://github.com/OnlyNandan/SlackBot#readme",
   "dependencies": {
-    "@slack/bolt": "^4.4.0"
+    "@slack/bolt": "^4.4.0",
+    "dotenv": "^17.2.0"
   }
 }
