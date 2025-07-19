@@ -1,51 +1,85 @@
 require('dotenv').config();
 const { App, ExpressReceiver } = require("@slack/bolt");
 const { GoogleGenerativeAI } = require("@google/generative-ai");
+// NEW: Import Google APIs library
+const { google } = require('googleapis');
 
-const knowledgeBase = {
-  admin_document: `
-    Project Phoenix Details (Admin & Leadership Only):
-    - Goal: Complete redesign of the company's main product infrastructure.
-    - Launch Date: Tentatively Q4 2025.
-    - Budget: $5,000,000 USD.
-    - Project Lead: Sarah Jenkins.
-    - Key Technologies: React, Go, and a serverless architecture on AWS.
-    - Codenames: The database component is codenamed "Griffin". The UI is "Firebird".
-  `,
-  member_document: `
-    Project Phoenix Details (General Audience):
-    - Goal: An exciting upcoming project to improve our main product for better performance and new features.
-    - Launch Date: To be announced at the next company all-hands meeting.
-    - Budget: Information not available to the public.
-    - Project Lead: The project is led by our amazing engineering team.
-  `
-};
+// =================================================================
+// NEW: Function to read from Google Docs
+// =================================================================
+async function getGoogleDocContent(documentId) {
+  try {
+    console.log("Authenticating with Google...");
+    // Authenticate with Google using the service account
+    const auth = new google.auth.GoogleAuth({
+      keyFile: process.env.GOOGLE_APPLICATION_CREDENTIALS,
+      scopes: ['https://www.googleapis.com/auth/documents.readonly'],
+    });
+    const authClient = await auth.getClient();
+    const docs = google.docs({ version: 'v1', auth: authClient });
 
+    console.log(`Fetching content from Google Doc ID: ${documentId}`);
+    // Call the Google Docs API
+    const res = await docs.documents.get({
+      documentId: documentId,
+    });
+
+    // Extract the text from the document body
+    let text = '';
+    res.data.body.content.forEach(element => {
+      if (element.paragraph) {
+        element.paragraph.elements.forEach(elem => {
+          if (elem.textRun) {
+            text += elem.textRun.content;
+          }
+        });
+      }
+    });
+    console.log("Successfully fetched document content.");
+    return text;
+  } catch (error) {
+    console.error("❌ Error fetching from Google Docs:", error.message);
+    // If there's an error, return a fallback message
+    return "Error: Could not retrieve the knowledge base document.";
+  }
+}
+// =================================================================
+
+
+// Initialize receiver for health checks
 const receiver = new ExpressReceiver({ signingSecret: process.env.SLACK_SIGNING_SECRET });
-
 receiver.router.get('/', (req, res) => {
   res.status(200).send('I am alive and ready to serve!');
 });
 
+// Initialize Slack App
 const app = new App({
   token: process.env.SLACK_BOT_TOKEN,
-  receiver: receiver 
+  receiver: receiver
 });
 
+// Initialize Google AI
 const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY);
 const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash"});
 
 
+// Listen for mentions
 app.event('app_mention', async ({ event, client, say }) => {
   console.log("✅ app_mention event received!");
   const userQuestion = event.text.replace(/<@.*?>/g, '').trim();
 
   try {
-    const userInfo = await client.users.info({ user: event.user });
-    const isAdmin = userInfo.user.is_admin;
-    console.log(`User <@${event.user}> is an admin: ${isAdmin}`);
+    // We are removing role-based logic for now to simplify.
+    // We will read from ONE document for all users.
+    // Replace with your actual Document ID
+    const documentId = "1GOdFMYcIbgfIig2rsvktEU79T5QYgcw8CklVJ4kwnpg";
+    const contextDocument = await getGoogleDocContent(documentId);
 
-    const contextDocument = isAdmin ? knowledgeBase.admin_document : knowledgeBase.member_document;
+    // If the document fetch failed, stop here.
+    if (contextDocument.startsWith("Error:")) {
+      await say(contextDocument);
+      return;
+    }
 
     const prompt = `
       You are a helpful assistant. Answer the following question based *only* on the provided document.
@@ -61,8 +95,7 @@ app.event('app_mention', async ({ event, client, say }) => {
 
     console.log("🤖 Sending prompt to AI...");
     const result = await model.generateContent(prompt);
-    const response = await result.response;
-    const aiResponseText = response.text();
+    const aiResponseText = result.response.text();
     console.log("🧠 AI Response:", aiResponseText);
 
     await say(aiResponseText);

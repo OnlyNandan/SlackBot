@@ -20,6 +20,7 @@
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
     "@slack/bolt": "^4.4.0",
-    "dotenv": "^17.2.0"
+    "dotenv": "^17.2.0",
+    "googleapis": "^153.0.0"
   }
 }
