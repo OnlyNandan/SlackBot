@@ -28,7 +28,7 @@ const app = new App({
 const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY);
 const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash"});
 
-app.receiver.app.get('/', (req, res) => {
+app.receiver.router.get('/', (req, res) => {
   res.status(200).send('I am alive and ready to serve!');
 });
 
