@@ -3,105 +3,118 @@ const { App, ExpressReceiver } = require("@slack/bolt");
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 const { google } = require('googleapis');
 const { Client } = require("@notionhq/client");
+const NodeCache = require("node-cache");
 
-// =================================================================
-// NEW: Function to read from Confluence
-// =================================================================
-async function getConfluencePageContent(pageId) {
-  const baseUrl = process.env.CONFLUENCE_URL;
-  const email = process.env.CONFLUENCE_USER_EMAIL;
-  const apiToken = process.env.CONfluence_API_TOKEN;
+const conversationCache = new NodeCache({ stdTTL: 600 });
 
-  // We need to create a base64-encoded token for Basic Authentication
-  const authToken = Buffer.from(`${email}:${apiToken}`).toString('base64');
-  
-  // The API endpoint to get a page and expand it to include the content
-  const apiUrl = `${baseUrl}/wiki/rest/api/content/${pageId}?expand=body.storage`;
-
-  try {
-    console.log(`Fetching content from Confluence Page ID: ${pageId}`);
-    const response = await fetch(apiUrl, {
-      headers: {
-        'Authorization': `Basic ${authToken}`,
-        'Accept': 'application/json',
-      },
-    });
-
-    if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status} ${response.statusText}`);
+async function getGoogleDocContent(documentId) {
+    try {
+        let auth;
+        if (process.env.GOOGLE_CREDENTIALS_JSON) {
+            const credentials = JSON.parse(process.env.GOOGLE_CREDENTIALS_JSON);
+            auth = new google.auth.GoogleAuth({ credentials, scopes: ['https://www.googleapis.com/auth/documents.readonly'] });
+        } else {
+            auth = new google.auth.GoogleAuth({ keyFile: process.env.GOOGLE_APPLICATION_CREDENTIALS, scopes: ['https://www.googleapis.com/auth/documents.readonly'] });
+        }
+        const authClient = await auth.getClient();
+        const docs = google.docs({ version: 'v1', auth: authClient });
+        const res = await docs.documents.get({ documentId });
+        let text = '';
+        res.data.body.content.forEach(element => {
+            if (element.paragraph) {
+                element.paragraph.elements.forEach(elem => {
+                    if (elem.textRun) { text += elem.textRun.content; }
+                });
+            }
+        });
+        return text;
+    } catch (error) {
+        console.error("❌ Error fetching from Google Docs:", error.message);
+        return "Error: Could not retrieve the Google Docs document.";
     }
-
-    const data = await response.json();
-    // The content is in HTML format, so we'll do a simple cleanup to get text
-    const rawHtml = data.body.storage.value;
-    const text = rawHtml.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
-
-    console.log("Successfully fetched Confluence content.");
-    return text;
-  } catch (error) {
-    console.error("❌ Error fetching from Confluence:", error.message);
-    return "Error: Could not retrieve the Confluence document.";
-  }
 }
-// =================================================================
 
+async function getNotionPageContent(pageId) {
+    const notion = new Client({ auth: process.env.NOTION_API_KEY });
+    try {
+        const response = await notion.blocks.children.list({ block_id: pageId });
+        let text = '';
+        for (const block of response.results) {
+            if (block.type && block[block.type].rich_text) {
+                text += block[block.type].rich_text.map(rt => rt.plain_text).join('');
+                text += '\n';
+            }
+        }
+        return text;
+    } catch (error) {
+        console.error("❌ Error fetching from Notion:", error.message);
+        return "Error: Could not retrieve the Notion document.";
+    }
+}
 
-// --- Your existing Notion and Google Docs functions remain here ---
-async function getNotionPageContent(pageId) { /* ... no changes ... */ }
-async function getGoogleDocContent(documentId) { /* ... no changes ... */ }
-
-
-// --- App Initialization (no changes) ---
 const receiver = new ExpressReceiver({ signingSecret: process.env.SLACK_SIGNING_SECRET });
 receiver.router.get('/', (req, res) => { res.status(200).send('I am alive and ready to serve!'); });
+
 const app = new App({ token: process.env.SLACK_BOT_TOKEN, receiver: receiver });
 const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY);
-const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash"});
+const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
-
-// --- Listen for mentions (Temporarily modified for Confluence testing) ---
-app.event('app_mention', async ({ event, client, say }) => {
-  console.log("✅ app_mention event received!");
-  const userQuestion = event.text.replace(/<@.*?>/g, '').trim();
-
-  try {
-    // FOR TESTING: We are now calling the Confluence function.
-    const confluencePageId = "131262"; 
-    const contextDocument = await getConfluencePageContent(confluencePageId);
-
-    if (contextDocument.startsWith("Error:")) {
-      await say(contextDocument);
-      return;
-    }
-
-    const prompt = `
-      You are a helpful assistant. Answer the question based *only* on the provided document.
-      If the answer is not found in the document, say "I do not have information on that."
-
-      DOCUMENT:
-      ---
-      ${contextDocument}
-      ---
-      QUESTION: "${userQuestion}"
-    `;
-
-    console.log("🤖 Sending prompt to AI...");
-    const result = await model.generateContent(prompt);
-    const aiResponseText = result.response.text();
-    console.log("🧠 AI Response:", aiResponseText);
-
-    await say(aiResponseText);
-
-  } catch (error) {
-    console.error("❌ Error processing AI request:", error);
-    await say("Sorry, I encountered an error while thinking. Please try again.");
-  }
+app.command('/index', async ({ command, ack, say }) => {
+    await ack();
+    say(`Got it! Starting the indexing process now... This can take a moment.`);
+    console.log(`✅ /index command received from user ${command.user_name}.`);
 });
 
+app.event('app_mention', async ({ event, client, say }) => {
+    const userQuestion = event.text.replace(/<@.*?>/g, '').trim();
+    const conversationId = `convo-${event.user}-${event.channel}`;
+    const previousConversation = conversationCache.get(conversationId);
 
-// --- Start the App (no changes) ---
+    try {
+        const documentId = process.env.GOOGLE_DOC_ID; 
+        const contextDocument = await getGoogleDocContent(documentId);
+
+        if (contextDocument.startsWith("Error:")) {
+            await say(contextDocument);
+            return;
+        }
+        
+        let prompt = `
+          You are a helpful assistant. Answer the following question based *only* on the provided document.
+          If the answer is not found in the document, say "I do not have information on that."
+
+          DOCUMENT:
+          ---
+          ${contextDocument}
+          ---
+        `;
+
+        if (previousConversation) {
+            prompt += `
+              For context, here was the previous question and answer:
+              PREVIOUS QUESTION: "${previousConversation.question}"
+              PREVIOUS ANSWER: "${previousConversation.answer}"
+              ---
+            `;
+        }
+
+        prompt += `NEW QUESTION: "${userQuestion}"`;
+
+        const result = await model.generateContent(prompt);
+        const aiResponseText = result.response.text();
+
+        conversationCache.set(conversationId, { question: userQuestion, answer: aiResponseText });
+
+        await say(aiResponseText);
+
+    } catch (error) {
+        console.error("❌ Error processing AI request:", error);
+        await say("Sorry, I encountered an error while thinking. Please try again.");
+    }
+});
+
 (async () => {
-  const port = process.env.PORT || 3000;
-  await app.start(port);
-  console.log(`⚡️ Bolt app is running on port ${port}!`);
+    const port = process.env.PORT || 3000;
+    await app.start(port);
+    console.log(`⚡️ Bolt app is running on port ${port}!`);
 })();
