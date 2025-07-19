@@ -5,28 +5,43 @@ const { google } = require('googleapis');
 const { Client } = require("@notionhq/client");
 const NodeCache = require("node-cache");
 
+// This will now act as our simple, in-memory vector database.
+let indexedKnowledge = "No knowledge has been indexed yet. Please run the /index command.";
 const conversationCache = new NodeCache({ stdTTL: 600 });
 
 async function getGoogleDocContent(documentId) {
-    if (!documentId) {
-        console.error("❌ Google Doc ID is missing from environment variables.");
-        return "Error: Google Doc ID is not configured.";
+    if (!documentId) return "Error: Google Doc ID is not configured.";
+    try {
+        let auth;
+        if (process.env.GOOGLE_CREDENTIALS_JSON) {
+            const credentials = JSON.parse(process.env.GOOGLE_CREDENTIALS_JSON);
+            auth = new google.auth.GoogleAuth({ credentials, scopes: ['https://www.googleapis.com/auth/documents.readonly'] });
+        } else {
+            auth = new google.auth.GoogleAuth({ keyFile: process.env.GOOGLE_APPLICATION_CREDENTIALS, scopes: ['https://www.googleapis.com/auth/documents.readonly'] });
+        }
+        const authClient = await auth.getClient();
+        const docs = google.docs({ version: 'v1', auth: authClient });
+        const res = await docs.documents.get({ documentId });
+        let text = '';
+        res.data.body.content.forEach(element => {
+            if (element.paragraph) {
+                element.paragraph.elements.forEach(elem => {
+                    if (elem.textRun) { text += elem.textRun.content; }
+                });
+            }
+        });
+        return text;
+    } catch (error) {
+        console.error("❌ Error fetching from Google Docs:", error.message);
+        return "Error: Could not retrieve the Google Docs document.";
     }
-    // ... rest of the function is the same
 }
 
 async function getNotionPageContent(pageId) {
-    if (!pageId) {
-        console.error("❌ Notion Page ID is missing from environment variables.");
-        return "Error: Notion Page ID is not configured.";
-    }
-    if (!process.env.NOTION_API_KEY) {
-        console.error("❌ Notion API Key is missing from environment variables.");
-        return "Error: Notion API Key is not configured.";
-    }
+    if (!pageId) return "Error: Notion Page ID is not configured.";
+    if (!process.env.NOTION_API_KEY) return "Error: Notion API Key is not configured.";
     const notion = new Client({ auth: process.env.NOTION_API_KEY });
     try {
-        console.log(`Fetching content from Notion Page ID: ${pageId}`); // This is the log we aren't seeing
         const response = await notion.blocks.children.list({ block_id: pageId });
         let text = '';
         for (const block of response.results) {
@@ -42,8 +57,6 @@ async function getNotionPageContent(pageId) {
     }
 }
 
-// ... rest of the file is the same, but I'll paste it all for clarity
-
 const receiver = new ExpressReceiver({ signingSecret: process.env.SLACK_SIGNING_SECRET });
 receiver.router.get('/', (req, res) => { res.status(200).send('I am alive and ready to serve!'); });
 
@@ -51,39 +64,74 @@ const app = new App({ token: process.env.SLACK_BOT_TOKEN, receiver: receiver });
 const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY);
 const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
+// The /index command now has real logic
 app.command('/index', async ({ command, ack, say }) => {
-    // ...
+    await ack();
+    say(`Got it, ${command.user_name}! Starting the indexing process. This might take a moment...`);
+    
+    const googleDocId = process.env.GOOGLE_DOC_ID;
+    const notionPageId = process.env.NOTION_PAGE_ID;
+
+    console.log("INDEXING: Fetching content from Google Docs and Notion...");
+    const [googleContent, notionContent] = await Promise.all([
+        getGoogleDocContent(googleDocId),
+        getNotionPageContent(notionPageId)
+    ]);
+
+    // Combine the content and store it in our "database" variable
+    indexedKnowledge = `
+        --- GOOGLE DOCS ---
+        ${googleContent}
+
+        --- NOTION ---
+        ${notionContent}
+    `;
+
+    console.log("✅ INDEXING COMPLETE!");
+    say("All knowledge sources have been successfully indexed and are ready for questions.");
 });
 
-app.event('app_mention', async ({ event, client, say }) => {
+// The @mention handler now reads from the index
+app.event('app_mention', async ({ event, say }) => {
     const userQuestion = event.text.replace(/<@.*?>/g, '').trim();
     const conversationId = `convo-${event.user}-${event.channel}`;
     const previousConversation = conversationCache.get(conversationId);
 
     try {
-        const googleDocId = process.env.GOOGLE_DOC_ID;
-        const notionPageId = process.env.NOTION_PAGE_ID;
+        // The context now comes from our fast, in-memory index
+        const contextDocument = indexedKnowledge;
 
-        // NEW DEBUGGING LOGS
-        console.log(`Preparing to fetch. Google Doc ID found: ${!!googleDocId}, Notion Page ID found: ${!!notionPageId}`);
-        console.log(`Notion API Key exists: ${!!process.env.NOTION_API_KEY}`);
-
-        console.log("Fetching content from Google Docs and Notion in parallel...");
-        const [googleContent, notionContent] = await Promise.all([
-            getGoogleDocContent(googleDocId),
-            getNotionPageContent(notionPageId)
-        ]);
-
-        const contextDocument = `
-
-          ${googleContent}
-  
-          ${notionContent}
+        let prompt = `
+          You are a helpful assistant. Answer the following question based *only* on the provided documents.
+          If the answer is not found in the documents, say "I do not have information on that."
+          DOCUMENTS:
+          ---
+          ${contextDocument}
+          ---
         `;
-        
-        // ... rest of the function is the same
+
+        if (previousConversation) {
+            prompt += `
+              For context, here was the previous question and answer:
+              PREVIOUS CONTEXT:
+              - The user previously asked: "${previousConversation.question}"
+              - You previously answered: "${previousConversation.answer}"
+              ---
+            `;
+        }
+
+        prompt += `NEW QUESTION: "${userQuestion}"`;
+
+        const result = await model.generateContent(prompt);
+        const aiResponseText = result.response.text();
+
+        conversationCache.set(conversationId, { question: userQuestion, answer: aiResponseText });
+
+        await say(aiResponseText);
+
     } catch (error) {
-        // ...
+        console.error("❌ Error processing AI request:", error);
+        await say("Sorry, I encountered an error while thinking. Please try again.");
     }
 });
 
