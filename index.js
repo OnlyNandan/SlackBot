@@ -1,7 +1,7 @@
 /**
- * @file A sophisticated Slack Bot that uses OpenAI as the primary AI with a fallback to Gemini.
+ * @file A sophisticated Slack Bot that uses Gemini as the primary AI with a fallback to OpenAI.
  * @author Your Name
- * @version 5.0.0
+ * @version 5.2.0
  */
 
 // -----------------------------------------------------------------------------
@@ -51,7 +51,6 @@ let indexedKnowledge = "No knowledge has been indexed yet. Please run the `/inde
 // -----------------------------------------------------------------------------
 
 const KnowledgeSource = {
-    // This module remains unchanged.
     getGoogleDocContent: async (documentId) => {
         if (!documentId) return "";
         try {
@@ -109,57 +108,68 @@ const KnowledgeSource = {
 };
 
 // -----------------------------------------------------------------------------
-// AI SERVICE MODULE (OpenAI Primary, Gemini Fallback)
+// AI SERVICE MODULE (Gemini Primary, OpenAI Fallback)
 // -----------------------------------------------------------------------------
 
 const AIService = {
-    openai: null,
     geminiModel: null,
+    openai: null,
 
     initialize: () => {
+        const genAI = new GoogleGenerativeAI(GOOGLE_API_KEY);
+        // Re-instated safety settings to prevent the model from refusing to answer
+        // due to overly sensitive content policies on complex prompts.
+        AIService.geminiModel = genAI.getGenerativeModel({
+            model: "gemini-1.5-flash",
+            safetySettings: [
+                { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH },
+                { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH },
+                { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH },
+                { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH },
+            ]
+        });
+        console.log("🤖 Primary AI Service (Gemini) Initialized.");
+
         if (OPENAI_API_KEY) {
             AIService.openai = new OpenAI({ apiKey: OPENAI_API_KEY });
-            console.log("🤖 Primary AI Service (OpenAI) Initialized.");
+            console.log("🤖 Fallback AI Service (OpenAI) Initialized.");
         } else {
-            console.error("❌ FATAL: OpenAI API Key not found. The primary AI service is disabled.");
+            console.warn("⚠️ OpenAI API Key not found. Fallback AI service is disabled.");
         }
-        
-        const genAI = new GoogleGenerativeAI(GOOGLE_API_KEY);
-        AIService.geminiModel = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-        console.log("🤖 Fallback AI Service (Gemini) Initialized.");
     },
 
     isRateLimitError: (error) => {
-        return error.message.includes('429') || (error.error && error.error.code === 'rate_limit_exceeded');
+        const message = error.message || '';
+        return message.includes('429') || (error.error && error.error.code === 'rate_limit_exceeded');
     },
     
-    // --- Primary Functions (Try OpenAI, fallback to Gemini) ---
+    // --- Primary Functions (Try Gemini, fallback to OpenAI) ---
 
     generateAnswer: async (userQuestion, previousConversation) => {
         const prompt = `You are a helpful and friendly assistant named 'KnowledgeBot'. You answer questions based *only* on the provided context. You are concise, professional, and you never mention the document you're using. If the answer is not in the document, say 'I do not have information on that.'\n\nPREVIOUS CONTEXT: ${previousConversation ? `User: "${previousConversation.question}". You: "${previousConversation.answer}"` : "None."}\n---\nDOCUMENT: ${indexedKnowledge}\n---\nNEW QUESTION: "${userQuestion}"`;
         try {
-            if (!AIService.openai) throw new Error("OpenAI service not initialized.");
-            return await AIService.generateAnswerWithOpenAI(prompt);
+            return await AIService.generateAnswerWithGemini(prompt);
         } catch (error) {
-            console.error("❌ Error with OpenAI (Answer):", error.message);
+            console.error("❌ Error with Gemini (Answer):", error);
             if (AIService.isRateLimitError(error)) {
-                console.log("🔀 OpenAI rate limited. Switching to Gemini for answer...");
-                return await AIService.generateAnswerWithGemini(prompt);
+                console.log("🔀 Gemini rate limited. Switching to OpenAI for answer...");
+                return await AIService.generateAnswerWithOpenAI(prompt);
             }
-            return "My primary AI service seems to be having trouble. Please try again later.";
+            // Improved error message for non-rate-limit issues
+            return "Sorry, I had trouble formulating a response. The AI may have refused to answer due to its safety policies. Please try rephrasing your question.";
         }
     },
 
     generateSuggestions: async (userQuestion, mainAnswer) => {
-        const prompt = `You are a suggestion generator. Your task is to suggest three distinct, insightful follow-up questions. Rules: 1. Suggestions MUST be answerable using ONLY the provided DOCUMENT. 2. Do not suggest questions if the answer is obvious from the original ANSWER. 3. Questions should be things a curious user would naturally ask next. 4. Return ONLY a valid JSON object with a single key "suggestions" which contains an array of strings. Example: { "suggestions": ["question 1", "question 2", "question 3"] }\n\nDOCUMENT:\n---\n${indexedKnowledge}\n---\nORIGINAL QUESTION: "${userQuestion}"\nORIGINAL ANSWER: "${mainAnswer}"`;
+        const prompt = `You are a suggestion generator. Your task is to suggest three distinct, insightful follow-up questions. Rules: 1. Suggestions MUST be answerable using ONLY the provided DOCUMENT. 2. Do not suggest questions if the answer is obvious from the original ANSWER. 3. Questions should be things a curious user would naturally ask next. 4. Return ONLY a JavaScript-style array of strings, like ["question 1", "question 2", "question 3"].\n\nDOCUMENT:\n---\n${indexedKnowledge}\n---\nORIGINAL QUESTION: "${userQuestion}"\nORIGINAL ANSWER: "${mainAnswer}"`;
         try {
-            if (!AIService.openai) throw new Error("OpenAI service not initialized.");
-            return await AIService.generateSuggestionsWithOpenAI(prompt);
+            return await AIService.generateSuggestionsWithGemini(prompt);
         } catch (error) {
-            console.error("❌ Error generating suggestions with OpenAI:", error.message);
+            console.error("❌ Error generating suggestions with Gemini:", error);
             if (AIService.isRateLimitError(error)) {
-                console.log("🔀 OpenAI rate limited. Switching to Gemini for suggestions...");
-                return await AIService.generateSuggestionsWithGemini(prompt);
+                console.log("🔀 Gemini rate limited. Switching to OpenAI for suggestions...");
+                const openAIPrompt = `You are a suggestion generator. Your task is to suggest three distinct, insightful follow-up questions. Rules: 1. Suggestions MUST be answerable using ONLY the provided DOCUMENT. 2. Do not suggest questions if the answer is obvious from the original ANSWER. 3. Questions should be things a curious user would naturally ask next. 4. Return ONLY a valid JSON object with a single key "suggestions" which contains an array of strings. Example: { "suggestions": ["question 1", "question 2", "question 3"] }\n\nDOCUMENT:\n---\n${indexedKnowledge}\n---\nORIGINAL QUESTION: "${userQuestion}"\nORIGINAL ANSWER: "${mainAnswer}"`;
+                return await AIService.generateSuggestionsWithOpenAI(openAIPrompt);
             }
             return []; // Fail silently for suggestions
         }
@@ -167,42 +177,50 @@ const AIService = {
 
     // --- Specific Implementations for each AI ---
 
-    generateAnswerWithOpenAI: async (prompt) => {
-        const completion = await AIService.openai.chat.completions.create({
-            model: "gpt-3.5-turbo",
-            messages: [{ role: "user", content: prompt }],
-        });
-        return completion.choices[0].message.content;
+    generateAnswerWithGemini: async (prompt) => {
+        const result = await AIService.geminiModel.generateContent(prompt);
+        // Check if the response was blocked
+        if (!result.response.text) {
+             throw new Error("Gemini response was blocked, likely due to safety settings.");
+        }
+        return result.response.text();
     },
 
-    generateAnswerWithGemini: async (prompt) => {
+    generateAnswerWithOpenAI: async (prompt) => {
         try {
-            const result = await AIService.geminiModel.generateContent(prompt);
-            return result.response.text();
+            const completion = await AIService.openai.chat.completions.create({
+                model: "gpt-3.5-turbo",
+                messages: [{ role: "user", content: prompt }],
+            });
+            return completion.choices[0].message.content;
         } catch (error) {
-            console.error("❌ Error generating answer from Gemini (Fallback):", error);
+            console.error("❌ Error generating answer from OpenAI (Fallback):", error);
             return "My fallback AI service also seems to be having trouble. Please try again later.";
         }
     },
     
-    generateSuggestionsWithOpenAI: async (prompt) => {
-        const completion = await AIService.openai.chat.completions.create({
-            model: "gpt-3.5-turbo-1106",
-            messages: [{ role: "system", content: "You are a suggestion generator." }, { role: "user", content: prompt }],
-            response_format: { type: "json_object" },
-        });
-        const content = JSON.parse(completion.choices[0].message.content);
-        return Array.isArray(content.suggestions) ? content.suggestions : [];
+    generateSuggestionsWithGemini: async (prompt) => {
+        const result = await AIService.geminiModel.generateContent(prompt);
+        if (!result.response.text) {
+             console.warn("⚠️ Gemini suggestion response was blocked.");
+             return [];
+        }
+        const text = result.response.text();
+        const arrayMatch = text.match(/\[\s*".*?"\s*(,\s*".*?"\s*)*\]/s);
+        return arrayMatch ? JSON.parse(arrayMatch[0]) : [];
     },
 
-    generateSuggestionsWithGemini: async (prompt) => {
+    generateSuggestionsWithOpenAI: async (prompt) => {
         try {
-            const result = await AIService.geminiModel.generateContent(prompt);
-            const text = result.response.text();
-            const arrayMatch = text.match(/\[\s*".*?"\s*(,\s*".*?"\s*)*\]/s);
-            return arrayMatch ? JSON.parse(arrayMatch[0]) : [];
+            const completion = await AIService.openai.chat.completions.create({
+                model: "gpt-3.5-turbo-1106",
+                messages: [{ role: "system", content: "You are a suggestion generator." }, { role: "user", content: prompt }],
+                response_format: { type: "json_object" },
+            });
+            const content = JSON.parse(completion.choices[0].message.content);
+            return Array.isArray(content.suggestions) ? content.suggestions : [];
         } catch (error) {
-            console.error("❌ Error generating suggestions from Gemini (Fallback):", error);
+            console.error("❌ Error generating suggestions from OpenAI (Fallback):", error);
             return []; // Fail silently
         }
     }
@@ -244,7 +262,7 @@ async function handleQuestion(userQuestion, userId, channelId) {
         const mainAnswer = await AIService.generateAnswer(userQuestion, previousConversation);
         
         let suggestions = [];
-        if (!mainAnswer.includes("I do not have information") && !mainAnswer.includes("having trouble")) {
+        if (!mainAnswer.includes("I do not have information") && !mainAnswer.includes("having trouble") && !mainAnswer.includes("formulating a response")) {
             suggestions = await AIService.generateSuggestions(userQuestion, mainAnswer);
         }
         
