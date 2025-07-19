@@ -2,85 +2,76 @@ require('dotenv').config();
 const { App, ExpressReceiver } = require("@slack/bolt");
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 const { google } = require('googleapis');
+// NEW: Import the Notion Client
+const { Client } = require("@notionhq/client");
 
-async function getGoogleDocContent(documentId) {
+// =================================================================
+// NEW: Function to read from Notion
+// =================================================================
+async function getNotionPageContent(pageId) {
+  // Initialize Notion client
+  const notion = new Client({ auth: process.env.NOTION_API_KEY });
   try {
-    let auth;
-    if (process.env.GOOGLE_CREDENTIALS_JSON) {
-      console.log("Authenticating with Google using JSON credentials from environment variable...");
-      const credentials = JSON.parse(process.env.GOOGLE_CREDENTIALS_JSON);
-      auth = new google.auth.GoogleAuth({
-        credentials,
-        scopes: ['https://www.googleapis.com/auth/documents.readonly'],
-      });
-    } else {
-      console.log("Authenticating with Google using key file from GOOGLE_APPLICATION_CREDENTIALS...");
-      auth = new google.auth.GoogleAuth({
-        keyFile: process.env.GOOGLE_APPLICATION_CREDENTIALS,
-        scopes: ['https://www.googleapis.com/auth/documents.readonly'],
-      });
-    }
-
-    const authClient = await auth.getClient();
-    const docs = google.docs({ version: 'v1', auth: authClient });
-
-    console.log(`Fetching content from Google Doc ID: ${documentId}`);
-    const res = await docs.documents.get({ documentId });
-
-    let text = '';
-    res.data.body.content.forEach(element => {
-      if (element.paragraph) {
-        element.paragraph.elements.forEach(elem => {
-          if (elem.textRun) {
-            text += elem.textRun.content;
-          }
-        });
-      }
+    console.log(`Fetching content from Notion Page ID: ${pageId}`);
+    // Get all the blocks (paragraphs, headings, etc.) from the page
+    const response = await notion.blocks.children.list({
+      block_id: pageId,
     });
-    console.log("Successfully fetched document content.");
+
+    // Extract the plain text from each block
+    let text = '';
+    for (const block of response.results) {
+      if (block.type && block[block.type].rich_text) {
+        text += block[block.type].rich_text.map(rt => rt.plain_text).join('');
+        text += '\n'; // Add a newline after each block
+      }
+    }
+    console.log("Successfully fetched Notion content.");
     return text;
   } catch (error) {
-    console.error("❌ Error fetching from Google Docs:", error.message);
-    return "Error: Could not retrieve the knowledge base document.";
+    console.error("❌ Error fetching from Notion:", error.message);
+    return "Error: Could not retrieve the Notion document.";
   }
 }
+// =================================================================
 
+
+// --- This is your existing Google Docs function. We are leaving it here for later. ---
+async function getGoogleDocContent(documentId) { /* ... no changes needed here ... */ }
+
+
+// --- App Initialization (no changes) ---
 const receiver = new ExpressReceiver({ signingSecret: process.env.SLACK_SIGNING_SECRET });
-receiver.router.get('/', (req, res) => {
-  res.status(200).send('I am alive and ready to serve!');
-});
-
-const app = new App({
-  token: process.env.SLACK_BOT_TOKEN,
-  receiver: receiver
-});
-
+receiver.router.get('/', (req, res) => { res.status(200).send('I am alive and ready to serve!'); });
+const app = new App({ token: process.env.SLACK_BOT_TOKEN, receiver: receiver });
 const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY);
 const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash"});
 
+
+// --- Listen for mentions (Temporarily modified for Notion testing) ---
 app.event('app_mention', async ({ event, client, say }) => {
   console.log("✅ app_mention event received!");
   const userQuestion = event.text.replace(/<@.*?>/g, '').trim();
 
   try {
-    // THIS IS THE ONLY LINE THAT CHANGED
-    const documentId = process.env.GOOGLE_DOC_ID; 
-    const contextDocument = await getGoogleDocContent(documentId);
+    // FOR TESTING: We are calling the Notion function instead of the Google Docs one.
+    const notionPageId = "2355be80190b803f8457e77a737af98f";
+    const contextDocument = await getNotionPageContent(notionPageId);
 
     if (contextDocument.startsWith("Error:")) {
       await say(contextDocument);
       return;
     }
 
+    // The rest of the AI prompt logic is the same
     const prompt = `
-      You are a helpful assistant. Answer the following question based *only* on the provided document.
+      You are a helpful assistant. Answer the question based *only* on the provided document.
       If the answer is not found in the document, say "I do not have information on that."
 
       DOCUMENT:
       ---
       ${contextDocument}
       ---
-
       QUESTION: "${userQuestion}"
     `;
 
@@ -97,6 +88,8 @@ app.event('app_mention', async ({ event, client, say }) => {
   }
 });
 
+
+// --- Start the App (no changes) ---
 (async () => {
   const port = process.env.PORT || 3000;
   await app.start(port);
