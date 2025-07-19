@@ -8,6 +8,7 @@ const NodeCache = require("node-cache");
 const conversationCache = new NodeCache({ stdTTL: 600 });
 
 async function getGoogleDocContent(documentId) {
+    if (!documentId) return "Error: Google Doc ID is not configured.";
     try {
         let auth;
         if (process.env.GOOGLE_CREDENTIALS_JSON) {
@@ -35,6 +36,7 @@ async function getGoogleDocContent(documentId) {
 }
 
 async function getNotionPageContent(pageId) {
+    if (!pageId) return "Error: Notion Page ID is not configured.";
     const notion = new Client({ auth: process.env.NOTION_API_KEY });
     try {
         const response = await notion.blocks.children.list({ block_id: pageId });
@@ -63,6 +65,7 @@ app.command('/index', async ({ command, ack, say }) => {
     await ack();
     say(`Got it! Starting the indexing process now... This can take a moment.`);
     console.log(`✅ /index command received from user ${command.user_name}.`);
+    // TODO: Add actual indexing logic here
 });
 
 app.event('app_mention', async ({ event, client, say }) => {
@@ -71,19 +74,30 @@ app.event('app_mention', async ({ event, client, say }) => {
     const previousConversation = conversationCache.get(conversationId);
 
     try {
-        const documentId = process.env.GOOGLE_DOC_ID; 
-        const contextDocument = await getGoogleDocContent(documentId);
+        const googleDocId = process.env.GOOGLE_DOC_ID;
+        const notionPageId = process.env.NOTION_PAGE_ID;
 
-        if (contextDocument.startsWith("Error:")) {
-            await say(contextDocument);
-            return;
-        }
+        console.log("Fetching content from Google Docs and Notion in parallel...");
+        const [googleContent, notionContent] = await Promise.all([
+            getGoogleDocContent(googleDocId),
+            getNotionPageContent(notionPageId)
+        ]);
+
+        const contextDocument = `
+          --- START OF GOOGLE DOCS CONTENT ---
+          ${googleContent}
+          --- END OF GOOGLE DOCS CONTENT ---
+
+          --- START OF NOTION CONTENT ---
+          ${notionContent}
+          --- END OF NOTION CONTENT ---
+        `;
         
         let prompt = `
-          You are a helpful assistant. Answer the following question based *only* on the provided document.
-          If the answer is not found in the document, say "I do not have information on that."
+          You are a helpful assistant. Answer the following question based *only* on the provided documents.
+          If the answer is not found in the documents, say "I do not have information on that."
 
-          DOCUMENT:
+          DOCUMENTS:
           ---
           ${contextDocument}
           ---
