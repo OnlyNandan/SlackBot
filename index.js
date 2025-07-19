@@ -95,7 +95,6 @@ app.event('app_mention', async ({ event, client, say }) => {
     try {
         const contextDocument = indexedKnowledge;
         
-        // --- Generate the main answer ---
         let answerPrompt = `
           You are a helpful assistant. First, consider the PREVIOUS CONTEXT if it exists. Then, answer the new QUESTION based *only* on the provided DOCUMENT.
           If the answer is not found in the document, say "I do not have information on that."
@@ -106,34 +105,35 @@ app.event('app_mention', async ({ event, client, say }) => {
         const answerResult = await model.generateContent(answerPrompt);
         const mainAnswer = answerResult.response.text();
 
-        // --- Generate predictive follow-up questions ---
         let suggestionPrompt = `
             Based on the following question and answer, suggest three likely follow-up questions.
-            Return ONLY a JavaScript-style array of strings, like ["question 1", "question 2", "question 3"]. Do not include any other text or formatting.
+            Return ONLY a JavaScript-style array of strings, like ["question 1", "question 2", "question 3"]. Do not include any other text, formatting, or markdown backticks.
             Question: "${userQuestion}"
             Answer: "${mainAnswer}"
         `;
         const suggestionResult = await model.generateContent(suggestionPrompt);
         const suggestionText = suggestionResult.response.text();
         
+        // --- NEW DEBUGGING LOGS ---
+        console.log("🧠 Raw suggestion response from AI:", suggestionText);
+
         let suggestions = [];
         try {
-            // We use a regex to find the array-like string in the AI's response
-            const arrayStringMatch = suggestionText.match(/\[(.*?)\]/);
+            const arrayStringMatch = suggestionText.match(/\[(.*?)\]/s); // Added 's' flag for multi-line matching
             if (arrayStringMatch) {
-                // Safely parse the string into a real array
+                console.log("✅ Found an array-like string in the response.");
                 suggestions = JSON.parse(arrayStringMatch[0]);
+            } else {
+                console.log("❌ Could not find an array-like string in the response.");
             }
         } catch (e) {
-            console.error("Could not parse suggestions from AI:", suggestionText);
+            console.error("❌ Error parsing suggestions from AI:", e.message);
         }
 
-        // --- Update conversation history ---
         conversationCache.set(conversationId, { question: userQuestion, answer: mainAnswer });
 
-        // --- Send the response to Slack with interactive buttons ---
         await say({
-            text: mainAnswer, // Main answer text
+            text: mainAnswer,
             blocks: [
                 {
                     type: "section",
@@ -142,7 +142,6 @@ app.event('app_mention', async ({ event, client, say }) => {
                         text: mainAnswer
                     }
                 },
-                // Only show the suggestions section if we have suggestions
                 ...(suggestions.length > 0 ? [
                     {
                         type: "divider"
@@ -156,14 +155,14 @@ app.event('app_mention', async ({ event, client, say }) => {
                     },
                     {
                         type: "actions",
-                        elements: suggestions.slice(0, 3).map(q => ({ // Max 3 buttons
+                        elements: suggestions.slice(0, 3).map(q => ({
                             type: "button",
                             text: {
                                 type: "plain_text",
                                 text: q,
                                 emoji: true
                             },
-                            value: q // The question text itself
+                            value: q
                         }))
                     }
                 ] : [])
@@ -176,16 +175,11 @@ app.event('app_mention', async ({ event, client, say }) => {
     }
 });
 
-// NEW: Add a listener for when a user clicks a suggestion button
 app.action(/.*/, async ({ action, ack, say, body }) => {
-    // Acknowledge the button click
     await ack();
-    // The 'value' of the button is the question text we want to ask
     const question = action.value;
-    // Post a message as the user, which will trigger the @mention handler again
     await say(`<@${body.user.id}> ${question}`);
 });
-
 
 (async () => {
     const port = process.env.PORT || 3000;
