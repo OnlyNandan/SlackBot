@@ -51,28 +51,46 @@ async function getNotionPageContent(pageId) {
     }
 }
 
-// =================================================================
-// NEW: Core "Thinking" Logic is now in its own function
-// =================================================================
 async function processQuestion(userQuestion, conversationId) {
     const previousConversation = conversationCache.get(conversationId);
     const contextDocument = indexedKnowledge;
     
-    let answerPrompt = `
-      You are a helpful assistant. First, consider the PREVIOUS CONTEXT if it exists. Then, answer the new QUESTION based *only* on the provided DOCUMENT.
-      If the answer is not found in the document, say "I do not have information on that."
-      PREVIOUS CONTEXT: ${previousConversation ? `User asked: "${previousConversation.question}" and you answered: "${previousConversation.answer}"` : "None"}
-      DOCUMENT: --- ${contextDocument} ---
-      NEW QUESTION: "${userQuestion}"
+    const answerPrompt = `
+      You are an expert assistant. Your task is to answer the user's NEW QUESTION.
+      Follow these rules strictly:
+      1.  First, look at the PREVIOUS CONTEXT to understand what the user is asking about, especially if the new question is a follow-up (e.g., uses "it", "they", "why?").
+      2.  Then, find the answer to the fully understood question within the provided DOCUMENT.
+      3.  Answer concisely and directly. Do NOT mention that you are answering "based on the document" or any similar phrases.
+      4.  If the answer cannot be found in the DOCUMENT, you must respond with "I do not have information on that."
+
+      PREVIOUS CONTEXT:
+      ${previousConversation ? `The user asked: "${previousConversation.question}". You answered: "${previousConversation.answer}"` : "None."}
+      ---
+      DOCUMENT:
+      ${contextDocument}
+      ---
+      NEW QUESTION:
+      "${userQuestion}"
     `;
+
     const answerResult = await model.generateContent(answerPrompt);
     const mainAnswer = answerResult.response.text();
 
-    let suggestionPrompt = `
-        Based on the following question and answer, suggest three distinct and different follow-up questions.
-        Return ONLY a JavaScript-style array of strings, like ["question 1", "question 2", "question 3"]. Do not include any other text, formatting, or markdown backticks.
-        Question: "${userQuestion}"
-        Answer: "${mainAnswer}"
+    // --- THIS IS THE UPDATED PROMPT FOR SUGGESTIONS ---
+    const suggestionPrompt = `
+        You are a suggestion generator. Your task is to suggest three distinct follow-up questions.
+        
+        Follow these rules strictly:
+        1.  The suggested questions MUST be answerable using ONLY the information found in the provided DOCUMENT.
+        2.  Do not suggest questions if the answer is already obvious from the original ANSWER.
+        3.  Return ONLY a JavaScript-style array of strings, like ["question 1", "question 2", "question 3"].
+
+        DOCUMENT:
+        ---
+        ${contextDocument}
+        ---
+        ORIGINAL QUESTION: "${userQuestion}"
+        ORIGINAL ANSWER: "${mainAnswer}"
     `;
     const suggestionResult = await model.generateContent(suggestionPrompt);
     const suggestionText = suggestionResult.response.text();
@@ -90,7 +108,6 @@ async function processQuestion(userQuestion, conversationId) {
 
     conversationCache.set(conversationId, { question: userQuestion, answer: mainAnswer });
 
-    // Return the final message payload
     return {
         text: mainAnswer,
         blocks: [
@@ -128,7 +145,6 @@ app.command('/index', async ({ command, ack, say }) => {
     say("All knowledge sources have been successfully indexed and are ready for questions.");
 });
 
-// The @mention handler is now much simpler
 app.event('app_mention', async ({ event, say }) => {
     try {
         const userQuestion = event.text.replace(/<@.*?>/g, '').trim();
@@ -141,7 +157,6 @@ app.event('app_mention', async ({ event, say }) => {
     }
 });
 
-// The button click handler is also simpler and more direct
 app.action(/.*/, async ({ action, ack, say, body }) => {
     await ack();
     try {
