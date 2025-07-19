@@ -5,7 +5,6 @@ const { google } = require('googleapis');
 const { Client } = require("@notionhq/client");
 const NodeCache = require("node-cache");
 
-// This will now act as our simple, in-memory vector database.
 let indexedKnowledge = "No knowledge has been indexed yet. Please run the /index command.";
 const conversationCache = new NodeCache({ stdTTL: 600 });
 
@@ -64,7 +63,6 @@ const app = new App({ token: process.env.SLACK_BOT_TOKEN, receiver: receiver });
 const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY);
 const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
-// The /index command now has real logic
 app.command('/index', async ({ command, ack, say }) => {
     await ack();
     say(`Got it, ${command.user_name}! Starting the indexing process. This might take a moment...`);
@@ -78,11 +76,9 @@ app.command('/index', async ({ command, ack, say }) => {
         getNotionPageContent(notionPageId)
     ]);
 
-    // Combine the content and store it in our "database" variable
     indexedKnowledge = `
         --- GOOGLE DOCS ---
         ${googleContent}
-
         --- NOTION ---
         ${notionContent}
     `;
@@ -91,48 +87,103 @@ app.command('/index', async ({ command, ack, say }) => {
     say("All knowledge sources have been successfully indexed and are ready for questions.");
 });
 
-// The @mention handler now reads from the index
-app.event('app_mention', async ({ event, say }) => {
+app.event('app_mention', async ({ event, client, say }) => {
     const userQuestion = event.text.replace(/<@.*?>/g, '').trim();
     const conversationId = `convo-${event.user}-${event.channel}`;
     const previousConversation = conversationCache.get(conversationId);
 
     try {
-        // The context now comes from our fast, in-memory index
         const contextDocument = indexedKnowledge;
-
-        let prompt = `
-          You are a helpful assistant. Answer the following question based *only* on the provided documents.
-          If the answer is not found in the documents, say "I do not have information on that."
-          DOCUMENTS:
-          ---
-          ${contextDocument}
-          ---
+        
+        // --- Generate the main answer ---
+        let answerPrompt = `
+          You are a helpful assistant. First, consider the PREVIOUS CONTEXT if it exists. Then, answer the new QUESTION based *only* on the provided DOCUMENT.
+          If the answer is not found in the document, say "I do not have information on that."
+          PREVIOUS CONTEXT: ${previousConversation ? `User asked: "${previousConversation.question}" and you answered: "${previousConversation.answer}"` : "None"}
+          DOCUMENT: --- ${contextDocument} ---
+          NEW QUESTION: "${userQuestion}"
         `;
+        const answerResult = await model.generateContent(answerPrompt);
+        const mainAnswer = answerResult.response.text();
 
-        if (previousConversation) {
-            prompt += `
-              For context, here was the previous question and answer:
-              PREVIOUS CONTEXT:
-              - The user previously asked: "${previousConversation.question}"
-              - You previously answered: "${previousConversation.answer}"
-              ---
-            `;
+        // --- Generate predictive follow-up questions ---
+        let suggestionPrompt = `
+            Based on the following question and answer, suggest three likely follow-up questions.
+            Return ONLY a JavaScript-style array of strings, like ["question 1", "question 2", "question 3"]. Do not include any other text or formatting.
+            Question: "${userQuestion}"
+            Answer: "${mainAnswer}"
+        `;
+        const suggestionResult = await model.generateContent(suggestionPrompt);
+        const suggestionText = suggestionResult.response.text();
+        
+        let suggestions = [];
+        try {
+            // We use a regex to find the array-like string in the AI's response
+            const arrayStringMatch = suggestionText.match(/\[(.*?)\]/);
+            if (arrayStringMatch) {
+                // Safely parse the string into a real array
+                suggestions = JSON.parse(arrayStringMatch[0]);
+            }
+        } catch (e) {
+            console.error("Could not parse suggestions from AI:", suggestionText);
         }
 
-        prompt += `NEW QUESTION: "${userQuestion}"`;
+        // --- Update conversation history ---
+        conversationCache.set(conversationId, { question: userQuestion, answer: mainAnswer });
 
-        const result = await model.generateContent(prompt);
-        const aiResponseText = result.response.text();
-
-        conversationCache.set(conversationId, { question: userQuestion, answer: aiResponseText });
-
-        await say(aiResponseText);
+        // --- Send the response to Slack with interactive buttons ---
+        await say({
+            text: mainAnswer, // Main answer text
+            blocks: [
+                {
+                    type: "section",
+                    text: {
+                        type: "mrkdwn",
+                        text: mainAnswer
+                    }
+                },
+                // Only show the suggestions section if we have suggestions
+                ...(suggestions.length > 0 ? [
+                    {
+                        type: "divider"
+                    },
+                    {
+                        type: "section",
+                        text: {
+                            type: "mrkdwn",
+                            text: "You might also want to ask:"
+                        }
+                    },
+                    {
+                        type: "actions",
+                        elements: suggestions.slice(0, 3).map(q => ({ // Max 3 buttons
+                            type: "button",
+                            text: {
+                                type: "plain_text",
+                                text: q,
+                                emoji: true
+                            },
+                            value: q // The question text itself
+                        }))
+                    }
+                ] : [])
+            ]
+        });
 
     } catch (error) {
         console.error("❌ Error processing AI request:", error);
         await say("Sorry, I encountered an error while thinking. Please try again.");
     }
+});
+
+// NEW: Add a listener for when a user clicks a suggestion button
+app.action(/.*/, async ({ action, ack, say, body }) => {
+    // Acknowledge the button click
+    await ack();
+    // The 'value' of the button is the question text we want to ask
+    const question = action.value;
+    // Post a message as the user, which will trigger the @mention handler again
+    await say(`<@${body.user.id}> ${question}`);
 });
 
 
