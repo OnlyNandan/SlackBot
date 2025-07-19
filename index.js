@@ -9,7 +9,7 @@ let indexedKnowledge = "No knowledge has been indexed yet. Please run the /index
 const conversationCache = new NodeCache({ stdTTL: 600 });
 
 async function getGoogleDocContent(documentId) {
-    if (!documentId) return "Error: Google Doc ID is not configured.";
+    if (!documentId) { console.error("❌ Google Doc ID is missing."); return "Error: Google Doc ID is not configured."; }
     try {
         let auth;
         if (process.env.GOOGLE_CREDENTIALS_JSON) {
@@ -23,11 +23,7 @@ async function getGoogleDocContent(documentId) {
         const res = await docs.documents.get({ documentId });
         let text = '';
         res.data.body.content.forEach(element => {
-            if (element.paragraph) {
-                element.paragraph.elements.forEach(elem => {
-                    if (elem.textRun) { text += elem.textRun.content; }
-                });
-            }
+            if (element.paragraph) { element.paragraph.elements.forEach(elem => { if (elem.textRun) { text += elem.textRun.content; } }); }
         });
         return text;
     } catch (error) {
@@ -37,16 +33,15 @@ async function getGoogleDocContent(documentId) {
 }
 
 async function getNotionPageContent(pageId) {
-    if (!pageId) return "Error: Notion Page ID is not configured.";
-    if (!process.env.NOTION_API_KEY) return "Error: Notion API Key is not configured.";
+    if (!pageId) { console.error("❌ Notion Page ID is missing."); return "Error: Notion Page ID is not configured."; }
+    if (!process.env.NOTION_API_KEY) { console.error("❌ Notion API Key is missing."); return "Error: Notion API Key is not configured."; }
     const notion = new Client({ auth: process.env.NOTION_API_KEY });
     try {
         const response = await notion.blocks.children.list({ block_id: pageId });
         let text = '';
         for (const block of response.results) {
             if (block.type && block[block.type].rich_text) {
-                text += block[block.type].rich_text.map(rt => rt.plain_text).join('');
-                text += '\n';
+                text += block[block.type].rich_text.map(rt => rt.plain_text).join('') + '\n';
             }
         }
         return text;
@@ -66,23 +61,10 @@ const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 app.command('/index', async ({ command, ack, say }) => {
     await ack();
     say(`Got it, ${command.user_name}! Starting the indexing process. This might take a moment...`);
-    
     const googleDocId = process.env.GOOGLE_DOC_ID;
     const notionPageId = process.env.NOTION_PAGE_ID;
-
-    console.log("INDEXING: Fetching content from Google Docs and Notion...");
-    const [googleContent, notionContent] = await Promise.all([
-        getGoogleDocContent(googleDocId),
-        getNotionPageContent(notionPageId)
-    ]);
-
-    indexedKnowledge = `
-        --- GOOGLE DOCS ---
-        ${googleContent}
-        --- NOTION ---
-        ${notionContent}
-    `;
-
+    const [googleContent, notionContent] = await Promise.all([ getGoogleDocContent(googleDocId), getNotionPageContent(notionPageId) ]);
+    indexedKnowledge = `--- GOOGLE DOCS ---\n${googleContent}\n\n--- NOTION ---\n${notionContent}`;
     console.log("✅ INDEXING COMPLETE!");
     say("All knowledge sources have been successfully indexed and are ready for questions.");
 });
@@ -114,17 +96,11 @@ app.event('app_mention', async ({ event, client, say }) => {
         const suggestionResult = await model.generateContent(suggestionPrompt);
         const suggestionText = suggestionResult.response.text();
         
-        // --- NEW DEBUGGING LOGS ---
-        console.log("🧠 Raw suggestion response from AI:", suggestionText);
-
         let suggestions = [];
         try {
-            const arrayStringMatch = suggestionText.match(/\[(.*?)\]/s); // Added 's' flag for multi-line matching
+            const arrayStringMatch = suggestionText.match(/\[(.*?)\]/s);
             if (arrayStringMatch) {
-                console.log("✅ Found an array-like string in the response.");
                 suggestions = JSON.parse(arrayStringMatch[0]);
-            } else {
-                console.log("❌ Could not find an array-like string in the response.");
             }
         } catch (e) {
             console.error("❌ Error parsing suggestions from AI:", e.message);
@@ -135,35 +111,21 @@ app.event('app_mention', async ({ event, client, say }) => {
         await say({
             text: mainAnswer,
             blocks: [
-                {
-                    type: "section",
-                    text: {
-                        type: "mrkdwn",
-                        text: mainAnswer
-                    }
-                },
+                { type: "section", text: { type: "mrkdwn", text: mainAnswer } },
                 ...(suggestions.length > 0 ? [
-                    {
-                        type: "divider"
-                    },
-                    {
-                        type: "section",
-                        text: {
-                            type: "mrkdwn",
-                            text: "You might also want to ask:"
-                        }
-                    },
+                    { type: "divider" },
+                    { type: "section", text: { type: "mrkdwn", text: "You might also want to ask:" } },
                     {
                         type: "actions",
-                        elements: suggestions.slice(0, 3).map(q => ({
-                            type: "button",
-                            text: {
-                                type: "plain_text",
-                                text: q,
-                                emoji: true
-                            },
-                            value: q
-                        }))
+                        elements: suggestions.slice(0, 3).map(q => {
+                            // THIS IS THE FIX: Truncate the button text if it's too long
+                            const buttonText = q.length > 75 ? q.substring(0, 72) + "..." : q;
+                            return {
+                                type: "button",
+                                text: { type: "plain_text", text: buttonText, emoji: true },
+                                value: q // The full question is still stored in the value
+                            };
+                        })
                     }
                 ] : [])
             ]
