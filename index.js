@@ -1,7 +1,7 @@
 /**
- * @file A sophisticated, hackathon-winning Slack Bot with multimodal capabilities, dynamic personas, and deep contextual actions.
+ * @file A high-performance, hackathon-winning Slack Bot using Vector Embeddings for rapid, intelligent answers.
  * @author Your Name
- * @version 10.0.0
+ * @version 11.0.0
  */
 
 // -----------------------------------------------------------------------------
@@ -46,7 +46,9 @@ const {
     LOG_LEVEL = 'info'
 } = process.env;
 
-let indexedKnowledge = "No knowledge has been indexed yet. Please run the `/index` command.";
+// NEW: In-memory vector store for embeddings
+let vectorStore = [];
+let indexedKnowledge = "No knowledge has been indexed yet. Please run the `/index` command."; // Kept for digest/summarize
 const STATS_FILE_PATH = path.join(__dirname, 'bot_stats.json');
 const CONVERSATION_CACHE = new NodeCache({ stdTTL: 600 });
 let currentPersona = "a helpful and friendly assistant named 'KnowledgeBot'";
@@ -64,7 +66,7 @@ let stats = {
 };
 
 // -----------------------------------------------------------------------------
-// PERSISTENCE FUNCTIONS
+// PERSISTENCE & UTILITY FUNCTIONS
 // -----------------------------------------------------------------------------
 
 async function saveStats() {
@@ -88,6 +90,18 @@ async function loadStats() {
             console.error("❌ Error loading stats:", error);
         }
     }
+}
+
+function cosineSimilarity(vecA, vecB) {
+    let dotProduct = 0.0;
+    let normA = 0.0;
+    let normB = 0.0;
+    for (let i = 0; i < vecA.length; i++) {
+        dotProduct += vecA[i] * vecB[i];
+        normA += vecA[i] * vecA[i];
+        normB += vecB[i] * vecB[i];
+    }
+    return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
 }
 
 // -----------------------------------------------------------------------------
@@ -128,19 +142,48 @@ const KnowledgeSource = {
             throw new Error(`Could not retrieve content from the URL.`);
         }
     },
+    
+    chunkText: (text, sourceName, chunkSize = 500, overlap = 50) => {
+        const chunks = [];
+        let i = 0;
+        if (!text) return chunks;
+        while (i < text.length) {
+            const end = Math.min(i + chunkSize, text.length);
+            chunks.push({
+                source: sourceName,
+                text: text.slice(i, end)
+            });
+            i += chunkSize - overlap;
+        }
+        return chunks;
+    },
+
     indexAll: async () => {
         console.log("🚀 Starting indexing process...");
         const sources = [KnowledgeSource.getGoogleDocContent(GOOGLE_DOC_ID), KnowledgeSource.getNotionPageContent(NOTION_PAGE_ID), KnowledgeSource.getURLContent(KNOWLEDGE_URL)];
         const results = await Promise.all(sources.map(p => p.catch(e => { console.error(e.message); return ""; })));
         const [googleContent, notionContent, urlContent] = results;
-        if (!googleContent && !notionContent && !urlContent) {
-            indexedKnowledge = "Failed to index any documents. Please check the logs for errors.";
-            console.error("❌ INDEXING FAILED! No content was retrieved.");
-        } else {
-            indexedKnowledge = `--- GOOGLE DOCS ---\n${googleContent}\n\n--- NOTION ---\n${notionContent}\n\n--- URL CONTENT ---\n${urlContent}`;
-            console.log("✅ Indexing complete!");
+
+        vectorStore = [];
+        indexedKnowledge = `--- GOOGLE DOCS ---\n${googleContent}\n\n--- NOTION ---\n${notionContent}\n\n--- URL CONTENT ---\n${urlContent}`;
+
+        const googleChunks = KnowledgeSource.chunkText(googleContent, 'google_doc');
+        const notionChunks = KnowledgeSource.chunkText(notionContent, 'notion');
+        const urlChunks = KnowledgeSource.chunkText(urlContent, 'url');
+        const allChunks = [...googleChunks, ...notionChunks, ...urlChunks];
+
+        console.log(`🧠 Found ${allChunks.length} text chunks to embed.`);
+        for (const chunk of allChunks) {
+            try {
+                const embedding = await AIService.generateEmbedding(chunk.text);
+                vectorStore.push({ ...chunk, embedding });
+            } catch(e) {
+                console.error(`❌ Failed to embed chunk: ${e.message}`);
+            }
         }
-        return indexedKnowledge.startsWith("Failed") ? indexedKnowledge : "All knowledge sources have been successfully indexed.";
+        
+        console.log(`✅ Indexing and embedding complete. ${vectorStore.length} vectors in store.`);
+        return `All knowledge sources have been successfully indexed and embedded. ${vectorStore.length} vectors are ready.`;
     }
 };
 
@@ -151,6 +194,7 @@ const KnowledgeSource = {
 const AIService = {
     geminiModel: null,
     geminiVisionModel: null,
+    embeddingModel: null,
     openai: null,
 
     initialize: () => {
@@ -163,7 +207,8 @@ const AIService = {
         ];
         AIService.geminiModel = genAI.getGenerativeModel({ model: "gemini-1.5-flash", safetySettings });
         AIService.geminiVisionModel = genAI.getGenerativeModel({ model: "gemini-1.5-pro", safetySettings });
-        console.log("🤖 Primary AI Services (Gemini Text & Vision) Initialized.");
+        AIService.embeddingModel = genAI.getGenerativeModel({ model: "embedding-001" });
+        console.log("🤖 Primary AI Services (Gemini Text, Vision, Embedding) Initialized.");
 
         if (OPENAI_API_KEY) {
             AIService.openai = new OpenAI({ apiKey: OPENAI_API_KEY });
@@ -174,6 +219,11 @@ const AIService = {
     },
 
     isRateLimitError: (error) => (error.message || '').includes('429') || (error.error && error.error.code === 'rate_limit_exceeded'),
+
+    generateEmbedding: async (text) => {
+        const result = await AIService.embeddingModel.embedContent(text);
+        return result.embedding.values;
+    },
 
     generateAnswer: async (prompt, useFallback = false) => {
         try {
@@ -199,12 +249,7 @@ const AIService = {
         try {
             const response = await axios.get(imageUrl, { responseType: 'arraybuffer' });
             const mimeType = response.headers['content-type'];
-            const imagePart = {
-                inlineData: {
-                    data: Buffer.from(response.data).toString('base64'),
-                    mimeType
-                }
-            };
+            const imagePart = { inlineData: { data: Buffer.from(response.data).toString('base64'), mimeType } };
             const result = await AIService.geminiVisionModel.generateContent([prompt, imagePart]);
             return result.response.text();
         } catch (error) {
@@ -262,23 +307,39 @@ function buildMessagePayload(text, suggestions = []) {
     return { text, blocks };
 }
 
-async function handleQuestion(userQuestion, channelId, userId, documentOverride = null) {
+async function handleQuestion(userQuestion, channelId, userId, sourceFilter = null) {
     stats.questionsAsked++;
     await saveStats();
     const thinkingMessage = await app.client.chat.postMessage({ channel: channelId, text: `🤔 Thinking...` });
 
     try {
+        if (vectorStore.length === 0) {
+            await app.client.chat.update({ channel: channelId, ts: thinkingMessage.ts, text: "My knowledge base is empty. Please run `/index` first." });
+            return;
+        }
+
+        const questionEmbedding = await AIService.generateEmbedding(userQuestion);
+        
+        let searchCorpus = sourceFilter ? vectorStore.filter(v => v.source === sourceFilter) : vectorStore;
+        if (searchCorpus.length === 0) {
+            await app.client.chat.update({ channel: channelId, ts: thinkingMessage.ts, text: `I couldn't find any indexed content for the source: \`${sourceFilter}\`.` });
+            return;
+        }
+
+        const scoredChunks = searchCorpus.map(chunk => ({...chunk, similarity: cosineSimilarity(questionEmbedding, chunk.embedding) }));
+        scoredChunks.sort((a, b) => b.similarity - a.similarity);
+        const relevantContext = scoredChunks.slice(0, 5).map(chunk => chunk.text).join('\n---\n');
+
         const conversationId = `convo-${userId}-${channelId}`;
         const previousConversation = CONVERSATION_CACHE.get(conversationId);
         
-        const document = documentOverride || indexedKnowledge;
-        const prompt = `You are ${currentPersona}. Answer the NEW QUESTION based on the DOCUMENT and PREVIOUS CONTEXT.\n\nPREVIOUS CONTEXT:\n${previousConversation ? `User: "${previousConversation.question}". You: "${previousConversation.answer}"` : "None."}\n---\nDOCUMENT:\n${document}\n---\nNEW QUESTION:\n"${userQuestion}"`;
+        const prompt = `You are ${currentPersona}. Answer the NEW QUESTION using ONLY the RELEVANT CONTEXT provided. Consider the PREVIOUS CONTEXT for follow-ups.\n\nPREVIOUS CONTEXT:\n${previousConversation ? `User: "${previousConversation.question}". You: "${previousConversation.answer}"` : "None."}\n---\nRELEVANT CONTEXT:\n${relevantContext}\n---\nNEW QUESTION:\n"${userQuestion}"`;
         
         const mainAnswer = await AIService.generateAnswer(prompt);
         
         let suggestions = [];
         if (!mainAnswer.includes("I do not have information")) {
-            const suggestionPrompt = `Based on the answer "${mainAnswer}", suggest three follow-up questions. Return a JavaScript array of strings.`;
+            const suggestionPrompt = `Based on the answer "${mainAnswer}" and the context "${relevantContext}", suggest three follow-up questions. Return a JavaScript array of strings.`;
             suggestions = await AIService.generateSuggestions(suggestionPrompt);
         }
         
@@ -330,11 +391,7 @@ app.command('/summarize', async ({ command, ack, say }) => {
         channel: command.channel_id,
         ts: thinkingMessage.ts,
         text: `Summary of ${sourceName}`,
-        blocks: [
-            { type: "section", text: { type: "mrkdwn", text: `*Summary of ${sourceName}*` } },
-            { type: "divider" },
-            { type: "section", text: { type: "mrkdwn", text: summary } }
-        ]
+        blocks: [ { type: "section", text: { type: "mrkdwn", text: `*Summary of ${sourceName}*` } }, { type: "divider" }, { type: "section", text: { type: "mrkdwn", text: summary } } ]
     });
 });
 
@@ -349,24 +406,14 @@ app.command('/digest', async ({ command, ack, say }) => {
     }
 
     const thinkingMessage = await say(`🔬 Analyzing the entire knowledge base to create a digest...`);
-    const prompt = `You are an expert analyst. Create a high-level executive summary (a "digest") of the entire knowledge base provided below. Identify the 3-5 most important themes, projects, or topics. Present them as clear, concise bullet points.
-
-KNOWLEDGE BASE:
----
-${indexedKnowledge}
----
-`;
+    const prompt = `You are an expert analyst. Create a high-level executive summary (a "digest") of the entire knowledge base provided below. Identify the 3-5 most important themes, projects, or topics. Present them as clear, concise bullet points.\n\nKNOWLEDGE BASE:\n---\n${indexedKnowledge}\n---`;
     const digest = await AIService.generateAnswer(prompt);
     
     await app.client.chat.update({
         channel: command.channel_id,
         ts: thinkingMessage.ts,
         text: `Knowledge Base Digest`,
-        blocks: [
-            { type: "section", text: { type: "mrkdwn", text: `*Knowledge Base Digest*` } },
-            { type: "divider" },
-            { type: "section", text: { type: "mrkdwn", text: digest } }
-        ]
+        blocks: [ { type: "section", text: { type: "mrkdwn", text: `*Knowledge Base Digest*` } }, { type: "divider" }, { type: "section", text: { type: "mrkdwn", text: digest } } ]
     });
 });
 
@@ -421,18 +468,9 @@ app.command('/configure', async ({ ack, client, command }) => {
     await ack();
     const view = {
         type: 'modal',
-        title: {
-            type: 'plain_text',
-            text: 'Bot Configuration'
-        },
+        title: { type: 'plain_text', text: 'Bot Configuration' },
         blocks: [
-            {
-                type: 'section',
-                text: {
-                    type: 'mrkdwn',
-                    text: 'Here are the current settings for the knowledge sources:'
-                }
-            },
+            { type: 'section', text: { type: 'mrkdwn', text: 'Here are the current settings for the knowledge sources:' } },
             { type: 'divider' },
             {
                 type: 'section',
@@ -445,10 +483,7 @@ app.command('/configure', async ({ ack, client, command }) => {
             }
         ]
     };
-    await client.views.open({
-        trigger_id: command.trigger_id,
-        view: view
-    });
+    await client.views.open({ trigger_id: command.trigger_id, view: view });
 });
 
 app.command('/stats', async ({ command, ack, say }) => {
@@ -500,50 +535,39 @@ app.event('app_mention', async ({ event, client }) => {
 
     const sourceRegex = /\sfrom\s(google_doc|notion|url)$/i;
     const match = userQuestion.match(sourceRegex);
-    let documentOverride = null;
+    let sourceFilter = null;
 
     if (match) {
-        const sourceName = match[1].toLowerCase();
+        sourceFilter = match[1].toLowerCase();
         const cleanQuestion = userQuestion.replace(sourceRegex, '').trim();
-        let content;
-        switch(sourceName) {
-            case 'google_doc': content = await KnowledgeSource.getGoogleDocContent(GOOGLE_DOC_ID); break;
-            case 'notion': content = await KnowledgeSource.getNotionPageContent(NOTION_PAGE_ID); break;
-            case 'url': content = await KnowledgeSource.getURLContent(KNOWLEDGE_URL); break;
-        }
-        if (!content) {
-            await client.chat.postMessage({ channel: event.channel, text: `I couldn't find content for \`${sourceName}\`.` });
-            return;
-        }
-        documentOverride = content;
-        await handleQuestion(cleanQuestion, event.channel, event.user, documentOverride);
+        await handleQuestion(cleanQuestion, event.channel, event.user, sourceFilter);
     } else {
         await handleQuestion(userQuestion, event.channel, event.user);
     }
 });
 
-// New: Handler for the "Explain This" message shortcut
 app.shortcut('explain_this', async ({ shortcut, ack, client }) => {
     await ack();
-    const userQuestion = shortcut.message.text;
+    const userQuestion = `Explain this message: "${shortcut.message.text}"`;
     const channelId = shortcut.channel.id;
     const userId = shortcut.user.id;
-    const threadTs = shortcut.message.ts; // Start a thread on the original message
+    const threadTs = shortcut.message.ts;
 
     try {
         stats.questionsAsked++;
         await saveStats();
         const thinkingMessage = await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: `🤔 Let me explain that...` });
 
-        const prompt = `You are ${currentPersona}. The user wants an explanation or more context about the following message. Use the DOCUMENT to provide a relevant answer.\n\nMESSAGE TO EXPLAIN:\n"${userQuestion}"\n\nDOCUMENT:\n${indexedKnowledge}`;
+        const questionEmbedding = await AIService.generateEmbedding(userQuestion);
+        const scoredChunks = vectorStore.map(chunk => ({...chunk, similarity: cosineSimilarity(questionEmbedding, chunk.embedding) }));
+        scoredChunks.sort((a, b) => b.similarity - a.similarity);
+        const relevantContext = scoredChunks.slice(0, 5).map(chunk => chunk.text).join('\n---\n');
+
+        const prompt = `You are ${currentPersona}. The user wants an explanation for a message. Use the RELEVANT CONTEXT to provide a relevant answer.\n\nMESSAGE TO EXPLAIN:\n"${shortcut.message.text}"\n\nRELEVANT CONTEXT:\n${relevantContext}`;
         
         const mainAnswer = await AIService.generateAnswer(prompt);
         
-        await client.chat.update({
-            channel: channelId,
-            ts: thinkingMessage.ts,
-            text: mainAnswer
-        });
+        await client.chat.update({ channel: channelId, ts: thinkingMessage.ts, text: mainAnswer });
 
     } catch (error) {
         console.error("❌ Error in 'Explain This' shortcut:", error);
